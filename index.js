@@ -1,35 +1,61 @@
 require('dotenv').config({ silent: true });
 
 const jwt = require("jsonwebtoken");
-const axios = require("axios");
+const jwksClient = require("jwks-rsa");
 
 const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
 const AUDIENCE = process.env.AUDIENCE;
+const ISSUER =`https://${AUTH0_DOMAIN}/`
+
+const client = jwksClient({
+  cache: true,
+  rateLimit: true,
+  jwksRequestsPerMinute: 10,
+  jwksUri: `${ISSUER}.well-known/jwks.json`
+});
+
+const getKey = (header, callback) => {
+  client.getSigningKey(header.kid, (err, key) => {
+      if (err) {
+          console.error("Error getting signing key:", err);
+          return callback(err, null);
+      }
+      const signingKey = key.publicKey || key.rsaPublicKey;
+      callback(null, signingKey);
+  });
+};
 
 module.exports.handler = async function (event) {
   const token = event.authorizationToken?.replace("Bearer ", "");
-  console.log({token});
+
   if (!token) {
     return generatePolicy("user", "Deny", event.methodArn);
   }
 
   try {
-    // Fetch Auth0 JWKS keys
-    const jwks = await axios.get(`https://${AUTH0_DOMAIN}/.well-known/jwks.json`);
-    const rsaKey = jwks.data.keys[0];
 
-    // Verify JWT
-    const decoded = jwt.verify(token, rsaKey, {
-      algorithms: ["RS256"],
-      audience: AUDIENCE,
-      issuer: `https://${AUTH0_DOMAIN}/`,
-    });
+    const decoded = await new Promise((resolve, reject) => {
+      jwt.verify(token, getKey, {
+          algorithms: ["RS256"],
+          audience: AUDIENCE,
+          issuer:ISSUER,
+      }, (err, decoded) => {
+          if (err) reject(err);
+          else resolve(decoded);
+      });
+  });
 
-    console.log("User Details:", decoded);
+    const userProfile = await fetch(`${ISSUER}userinfo`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }).then((res) => res.json());
 
-    return generatePolicy(decoded.sub, "Allow", event.methodArn, decoded);
+
+    return generatePolicy(decoded.sub, "Allow", event.methodArn, userProfile);
   } catch (error) {
-    console.error("Auth failed:", error);
+
     return generatePolicy("user", "Deny", event.methodArn);
   }
 };
